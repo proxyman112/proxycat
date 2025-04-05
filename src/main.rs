@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
-use crate::error::Result;
+use crate::error::{Result, ProxyCatError};
 use axum::{
     response::Html,
     routing::{get, post},
@@ -83,22 +83,27 @@ async fn main() -> Result<()> {
     info!("Starting ProxyCat application...");
     info!("Command line arguments: {:?}", args);
 
+    // Get initial host, port, pac_path for comparison
+    let initial_host = APP_CONFIG.get_host()?;
+    let initial_port = APP_CONFIG.get_port();
+    let initial_pac_path = APP_CONFIG.get_pac_path()?;
+
     // Update port, host, and PAC path if specified
-    let pac_url = if args.port != APP_CONFIG.get_port() || 
-                    args.host != APP_CONFIG.get_host() || 
-                    args.pac_path != APP_CONFIG.get_pac_path() {
-        if args.port != APP_CONFIG.get_port() {
-            APP_CONFIG.update_port(args.port);
+    let pac_url = if args.port != initial_port || 
+                    args.host != initial_host || 
+                    args.pac_path != initial_pac_path {
+        if args.port != initial_port {
+            APP_CONFIG.update_port(args.port)?;
         }
-        if args.host != APP_CONFIG.get_host() {
-            APP_CONFIG.update_host(args.host.clone());
+        if args.host != initial_host {
+            APP_CONFIG.update_host(args.host.clone())?;
         }
-        if args.pac_path != APP_CONFIG.get_pac_path() {
-            APP_CONFIG.update_pac_path(args.pac_path.clone());
+        if args.pac_path != initial_pac_path {
+            APP_CONFIG.update_pac_path(args.pac_path.clone())?;
         }
-        APP_CONFIG.get_pac_url()
+        APP_CONFIG.get_pac_url()?
     } else {
-        APP_CONFIG.get_pac_url()
+        APP_CONFIG.get_pac_url()?
     };
 
     // Create and save the icon for the system tray
@@ -129,8 +134,10 @@ async fn main() -> Result<()> {
     let menu = Menu::new();
     let open_item = MenuItem::new("Open", true, None);
     let exit_item = MenuItem::new("Exit", true, None);
-    menu.append(&open_item).unwrap();
-    menu.append(&exit_item).unwrap();
+    menu.append(&open_item)
+        .map_err(|e| ProxyCatError::Menu(format!("Failed to append 'Open' item: {}", e)))?;
+    menu.append(&exit_item)
+        .map_err(|e| ProxyCatError::Menu(format!("Failed to append 'Exit' item: {}", e)))?;
 
     // Store menu item IDs for event handling
     let open_id = open_item.id().clone();
@@ -139,7 +146,8 @@ async fn main() -> Result<()> {
 
     // Create and configure the system tray icon
     info!("Loading icon from file...");
-    let icon = Icon::from_path("icon.ico", None).unwrap();
+    let icon = Icon::from_path("icon.ico", None)
+        .map_err(|e| ProxyCatError::Icon(format!("Failed to load icon: {}", e)))?;
     info!("Creating tray icon...");
     #[allow(clippy::arc_with_non_send_sync)]
     let tray_icon = Arc::new(Mutex::new(
@@ -148,7 +156,7 @@ async fn main() -> Result<()> {
             .with_tooltip("ProxyCat")
             .with_icon(icon)
             .build()
-            .unwrap()
+            .map_err(|e| ProxyCatError::TrayIcon(format!("Failed to build tray icon: {}", e)))?
     ));
     info!("Tray icon created successfully");
 
@@ -160,23 +168,37 @@ async fn main() -> Result<()> {
 
     // Start the HTTP server in a separate thread
     info!("Starting HTTP server thread...");
+    let current_pac_path = APP_CONFIG.get_pac_path()?;
+    let server_pac_config = Arc::clone(&pac_config);
     tokio::spawn(async move {
         let app = Router::new()
             .route("/", get(handler))
             .route("/favicon.ico", get(favicon_handler))
-            .route(APP_CONFIG.get_pac_path().as_str(), get(pac_handler))
+            .route(&current_pac_path, get(pac_handler))
             .route("/config", get(config_handler))
             .route("/toggle/:list_id/:index", post(toggle_handler))
             .route("/move/:list_id/:from_index/:to_index", post(move_handler))
             .route("/pac-content", get(pac_content_handler))
             .route("/add-item", post(add_item_handler))
             .layer(CorsLayer::permissive())
-            .with_state(pac_config_clone);
+            .with_state(server_pac_config);
 
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], APP_CONFIG.get_port()));
         info!("Starting server on http://{}", addr);
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, app).await.unwrap();
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Failed to bind TCP listener: {}", e);
+                // Cannot return error directly from spawn, log and exit?
+                // For now, just log and the thread will panic later.
+                // Consider sending error back via a channel if needed.
+                return;
+            }
+        };
+        if let Err(e) = axum::serve(listener, app).await {
+             error!("Axum server failed: {}", e);
+             // Log error, thread will terminate.
+        }
     });
 
     // Set Windows proxy configuration to use the local PAC file
@@ -256,7 +278,15 @@ async fn main() -> Result<()> {
                     }
                     TrayIconEvent::DoubleClick { .. } => {
                         debug!("Double click detected, opening URL...");
-                        match that(format!("http://{}:{}", APP_CONFIG.get_host(), APP_CONFIG.get_port())) {
+                        let open_url = match (APP_CONFIG.get_host(), APP_CONFIG.get_port()) {
+                            (Ok(host), port) => format!("http://{}:{}", host, port),
+                            (Err(e), port) => {
+                                error!("Failed to get host for opening URL: {}", e);
+                                // Fallback to localhost if getting host fails
+                                format!("http://127.0.0.1:{}", port)
+                            }
+                        };
+                        match that(open_url) {
                             Ok(_) => debug!("URL opened successfully"),
                             Err(e) => error!("Failed to open URL: {}", e),
                         }
@@ -277,7 +307,15 @@ async fn main() -> Result<()> {
                 match event.id() {
                     id if *id == open_id => {
                         info!("Opening ProxyCat interface...");
-                        match that(format!("http://{}:{}", APP_CONFIG.get_host(), APP_CONFIG.get_port())) {
+                        let open_url = match (APP_CONFIG.get_host(), APP_CONFIG.get_port()) {
+                            (Ok(host), port) => format!("http://{}:{}", host, port),
+                            (Err(e), port) => {
+                                error!("Failed to get host for opening menu action: {}", e);
+                                // Fallback to localhost if getting host fails
+                                format!("http://127.0.0.1:{}", port)
+                            }
+                        };
+                        match that(open_url) {
                             Ok(_) => info!("Browser opened successfully"),
                             Err(e) => error!("Failed to open browser: {}", e),
                         }
@@ -285,8 +323,16 @@ async fn main() -> Result<()> {
                     id if *id == exit_id => {
                         info!("Shutting down ProxyCat...");
                         // Remove the tray icon before exiting
-                        if let Err(e) = tray_icon.lock().unwrap().set_visible(false) {
-                            error!("Failed to remove tray icon: {}", e);
+                        let lock_result = tray_icon.lock();
+                        match lock_result {
+                            Ok(guard) => {
+                                if let Err(e) = guard.set_visible(false) {
+                                     error!("Failed to hide tray icon: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to lock tray icon mutex: {}", e);
+                            }
                         }
                         std::process::exit(0);
                     }
@@ -393,7 +439,7 @@ async fn config_handler(State(config): State<SharedPacConfig>) -> impl IntoRespo
 async fn toggle_handler(
     State(config): State<SharedPacConfig>,
     Path((list_id, index)): Path<(String, usize)>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse> {
     debug!("Handling toggle request for {list_id} at index {index}");
     let mut config = config.write().await;
     
@@ -401,101 +447,114 @@ async fn toggle_handler(
         "proxyRules" => {
             if let Some(item) = config.proxy_rules.get_mut(index) {
                 item.enabled = !item.enabled;
+            } else {
+                return Err(ProxyCatError::Internal(format!("Invalid index {index} for proxyRules")));
             }
         }
         "bypassList" => {
             if let Some(item) = config.bypass_list.get_mut(index) {
                 item.enabled = !item.enabled;
+            } else {
+                 return Err(ProxyCatError::Internal(format!("Invalid index {index} for bypassList")));
             }
         }
         "externalPacFunctions" => {
             if let Some(item) = config.external_pac_functions.get_mut(index) {
                 item.enabled = !item.enabled;
+            } else {
+                 return Err(ProxyCatError::Internal(format!("Invalid index {index} for externalPacFunctions")));
             }
         }
-        _ => return (StatusCode::BAD_REQUEST, "Invalid list type").into_response(),
+        _ => return Err(ProxyCatError::Internal(format!("Invalid list type: {list_id}"))),
     }
 
     // Save the configuration after toggling
-    if let Err(e) = config.save_current() {
-        error!("Failed to save configuration after toggling item: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save configuration").into_response();
-    }
+    config.save_current()?;
 
-    (StatusCode::OK, "Item toggled successfully").into_response()
+    Ok((StatusCode::OK, "Item toggled successfully"))
 }
 
 /// Handles requests to move an item within a list
 async fn move_handler(
     State(config): State<SharedPacConfig>,
     Path((list_id, from_index, to_index)): Path<(String, usize, usize)>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse> {
     debug!("Handling move request for {list_id} from {from_index} to {to_index}");
     let mut config = config.write().await;
     
+    let error_msg = |idx: usize| format!("Invalid index {} in move operation", idx);
+
     match list_id.as_str() {
         "proxyRules" => {
-            if from_index < config.proxy_rules.len() && to_index < config.proxy_rules.len() {
-                let item = config.proxy_rules.remove(from_index).unwrap();
+            if from_index < config.proxy_rules.len() && to_index <= config.proxy_rules.len() {
+                let item = config.proxy_rules.remove(from_index)
+                    .ok_or_else(|| ProxyCatError::Internal(error_msg(from_index)))?;
                 config.proxy_rules.insert(to_index, item);
+            } else {
+                 return Err(ProxyCatError::Internal(format!("Invalid indices for proxyRules: from={}, to={}", from_index, to_index)));
             }
         }
         "bypassList" => {
-            if from_index < config.bypass_list.len() && to_index < config.bypass_list.len() {
-                let item = config.bypass_list.remove(from_index).unwrap();
+            if from_index < config.bypass_list.len() && to_index <= config.bypass_list.len() {
+                let item = config.bypass_list.remove(from_index)
+                     .ok_or_else(|| ProxyCatError::Internal(error_msg(from_index)))?;
                 config.bypass_list.insert(to_index, item);
+            } else {
+                 return Err(ProxyCatError::Internal(format!("Invalid indices for bypassList: from={}, to={}", from_index, to_index)));
             }
         }
         "externalPacFunctions" => {
-            if from_index < config.external_pac_functions.len() && to_index < config.external_pac_functions.len() {
-                let item = config.external_pac_functions.remove(from_index).unwrap();
+             if from_index < config.external_pac_functions.len() && to_index <= config.external_pac_functions.len() {
+                 let item = config.external_pac_functions.remove(from_index)
+                     .ok_or_else(|| ProxyCatError::Internal(error_msg(from_index)))?;
                 config.external_pac_functions.insert(to_index, item);
+            } else {
+                 return Err(ProxyCatError::Internal(format!("Invalid indices for externalPacFunctions: from={}, to={}", from_index, to_index)));
             }
         }
-        _ => return (StatusCode::BAD_REQUEST, "Invalid list type").into_response(),
+         _ => return Err(ProxyCatError::Internal(format!("Invalid list type: {list_id}"))),
     }
 
     // Save the configuration after moving
-    if let Err(e) = config.save_current() {
-        error!("Failed to save configuration after moving item: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save configuration").into_response();
-    }
+    config.save_current()?;
 
-    (StatusCode::OK, "Item moved successfully").into_response()
+    Ok((StatusCode::OK, "Item moved successfully"))
 }
 
 /// Handles requests to add new items to any list
 async fn add_item_handler(
     State(config): State<SharedPacConfig>,
     Json(request): Json<AddItemRequest>,
-) -> impl IntoResponse {
+) -> Result<StatusCode> {
     debug!("Handling add item request: {:?}", request);
     let mut config = config.write().await;
     
     match request.list_type.as_str() {
         "proxy_rules" => {
-            if let Ok(item) = serde_json::from_value::<ProxyRuleItem>(request.item) {
-                config.proxy_rules.push_back(item);
-            }
+            let item = serde_json::from_value::<ProxyRuleItem>(request.item)
+                .map_err(|e| ProxyCatError::Internal(format!("Failed to parse ProxyRuleItem: {}", e)))?;
+            config.proxy_rules.push_back(item);
         }
         "bypass_list" => {
-            if let Ok(item) = serde_json::from_value::<BypassListItem>(request.item) {
-                config.bypass_list.push_back(item);
-            }
+            let item = serde_json::from_value::<BypassListItem>(request.item)
+                 .map_err(|e| ProxyCatError::Internal(format!("Failed to parse BypassListItem: {}", e)))?;
+            config.bypass_list.push_back(item);
         }
         "external_pac_functions" => {
-            if let Ok(item) = serde_json::from_value::<ExternalPacFunctionItem>(request.item) {
-                // Load the external PAC file before adding it to the list
-                config.load_external_pac(&item.function.original_url).await;
-            }
+             let item = serde_json::from_value::<ExternalPacFunctionItem>(request.item)
+                 .map_err(|e| ProxyCatError::Internal(format!("Failed to parse ExternalPacFunctionItem: {}", e)))?;
+            // Load the external PAC file before adding it to the list
+            // Note: load_external_pac logs errors internally but doesn't return Result
+            // Consider refactoring load_external_pac to return Result if needed
+            config.load_external_pac(&item.function.original_url).await;
+            // We might still want to add the item even if loading failed, maybe add it disabled?
+            // For now, just add it. Consider the implications.
+             config.external_pac_functions.push_back(item);
         }
-        _ => return StatusCode::BAD_REQUEST,
+         _ => return Err(ProxyCatError::Internal(format!("Invalid list type: {}", request.list_type))),
     }
 
-    if let Err(e) = config.save_current() {
-        error!("Failed to save configuration after adding item: {}", e);
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
+    config.save_current()?;
 
-    StatusCode::OK
+    Ok(StatusCode::OK)
 }

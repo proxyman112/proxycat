@@ -1,7 +1,8 @@
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::sync::Arc;
 use std::sync::LazyLock;
+use crate::error::{Result, ProxyCatError};
 
 /// Application-wide constants
 pub struct AppConfig {
@@ -37,14 +38,18 @@ pub static APP_CONFIG: AppConfig = AppConfig {
 };
 
 impl AppConfig {
+    fn lock_mutex<'a, T>(mutex: &'a Mutex<T>, name: &str) -> Result<MutexGuard<'a, T>> {
+        mutex.lock().map_err(|e| ProxyCatError::MutexPoisoned(format!("Failed to lock {}: {}", name, e)))
+    }
+
     /// Updates the port number and returns the new PAC URL
-    pub fn update_port(&self, new_port: u16) -> String {
+    pub fn update_port(&self, new_port: u16) -> Result<String> {
         self.port.store(new_port, Ordering::SeqCst);
-        let host = self.host.lock().unwrap();
-        let pac_path = self.master_pac_path.lock().unwrap();
-        let new_url = format!("http://{}:{}{}", host, new_port, pac_path);
-        *self.master_pac_url.lock().unwrap() = new_url.clone();
-        new_url
+        let host = Self::lock_mutex(self.host, "host")?;
+        let pac_path = Self::lock_mutex(self.master_pac_path, "master_pac_path")?;
+        let new_url = format!("http://{}:{}{}", *host, new_port, *pac_path);
+        *Self::lock_mutex(self.master_pac_url, "master_pac_url")? = new_url.clone();
+        Ok(new_url)
     }
 
     /// Gets the current port number
@@ -53,37 +58,37 @@ impl AppConfig {
     }
 
     /// Updates the host and returns the new PAC URL
-    pub fn update_host(&self, new_host: String) -> String {
+    pub fn update_host(&self, new_host: String) -> Result<String> {
         let port = self.get_port();
-        let pac_path = self.master_pac_path.lock().unwrap();
-        let new_url = format!("http://{}:{}{}", new_host, port, pac_path);
-        *self.host.lock().unwrap() = new_host;
-        *self.master_pac_url.lock().unwrap() = new_url.clone();
-        new_url
+        let pac_path = Self::lock_mutex(self.master_pac_path, "master_pac_path")?;
+        let new_url = format!("http://{}:{}{}", new_host, port, *pac_path);
+        *Self::lock_mutex(self.host, "host")? = new_host;
+        *Self::lock_mutex(self.master_pac_url, "master_pac_url")? = new_url.clone();
+        Ok(new_url)
     }
 
     /// Gets the current host
-    pub fn get_host(&self) -> String {
-        self.host.lock().unwrap().clone()
+    pub fn get_host(&self) -> Result<String> {
+        Ok(Self::lock_mutex(self.host, "host")?.clone())
     }
 
     /// Updates the PAC path and returns the new PAC URL
-    pub fn update_pac_path(&self, new_path: String) -> String {
-        let host = self.host.lock().unwrap();
+    pub fn update_pac_path(&self, new_path: String) -> Result<String> {
+        let host = Self::lock_mutex(self.host, "host")?;
         let port = self.get_port();
-        let new_url = format!("http://{}:{}{}", host, port, new_path);
-        *self.master_pac_path.lock().unwrap() = new_path;
-        *self.master_pac_url.lock().unwrap() = new_url.clone();
-        new_url
+        let new_url = format!("http://{}:{}{}", *host, port, new_path);
+        *Self::lock_mutex(self.master_pac_path, "master_pac_path")? = new_path;
+        *Self::lock_mutex(self.master_pac_url, "master_pac_url")? = new_url.clone();
+        Ok(new_url)
     }
 
     /// Gets the current PAC path
-    pub fn get_pac_path(&self) -> String {
-        self.master_pac_path.lock().unwrap().clone()
+    pub fn get_pac_path(&self) -> Result<String> {
+        Ok(Self::lock_mutex(self.master_pac_path, "master_pac_path")?.clone())
     }
 
     /// Gets the current PAC URL
-    pub fn get_pac_url(&self) -> String {
-        self.master_pac_url.lock().unwrap().clone()
+    pub fn get_pac_url(&self) -> Result<String> {
+        Ok(Self::lock_mutex(self.master_pac_url, "master_pac_url")?.clone())
     }
 } 
