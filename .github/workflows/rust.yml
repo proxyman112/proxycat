@@ -16,9 +16,14 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
     - name: Run Clippy
       run: cargo clippy -- -D warnings 
+    - name: Build Release
+      run: cargo build --release --verbose
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: proxycat-windows
+        path: target/release/proxycat.exe
