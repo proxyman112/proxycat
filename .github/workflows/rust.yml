@@ -3,6 +3,8 @@ name: Rust CI
 on:
   push:
     branches: [ main ]
+    tags:
+      - 'v*' # This will trigger the workflow on version tags
   pull_request:
     branches: [ main ]
 
@@ -22,8 +24,11 @@ jobs:
       run: cargo clippy
     - name: Build Release
       run: cargo build --release --verbose
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/v')  # Only run on version tags
+      uses: softprops/action-gh-release@v1
       with:
-        name: proxycat-windows
-        path: target/release/proxycat.exe
+        files: target/release/proxycat.exe
+        draft: false
+        prerelease: false
+        generate_release_notes: true

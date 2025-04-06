@@ -1,6 +1,6 @@
 # ProxyCat
 
-A lightweight Windows proxy management tool.
+A lightweight Windows Proxy management/con-Cat-enation tool.
 
 ## Description
 
@@ -20,7 +20,13 @@ Many users, especially those working with governmental resources, often need to 
 - Rust 1.75 or later
 - Windows 7 or later
 
-## Installation
+## Download
+
+You can download the latest release of ProxyCat from our [Releases page](https://github.com/proxyman112/proxycat/releases/latest).
+
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/proxyman112/proxycat)](https://github.com/proxyman112/proxycat/releases/latest)
+
+## Local Installation / Build
 
 1. Install Rust from https://rustup.rs/
 2. Clone this repository
@@ -28,16 +34,21 @@ Many users, especially those working with governmental resources, often need to 
    ```bash
    cargo build --release
    ```
+4. The executable will be located in `target/release/proxycat.exe` 
 
 ## Usage
 
 1. Run the application:
    ```bash
-   cargo run --release
+   proxycat.exe
    ```
 2. The application will start and show an icon in the system tray
 3. Double-click the tray icon or use the context menu to open the web interface
 4. The web interface will be available at http://localhost:12112
+5. You can also use the command line arguments to start the application with a specific configuration:
+   ```bash
+   proxycat.exe --help
+   ```
 
 ## Features
 
@@ -45,13 +56,3 @@ Many users, especially those working with governmental resources, often need to 
 - Web interface accessible through the tray icon
 - Minimal executable size
 - Windows compatibility
-
-## Building for Distribution
-
-To create a minimal executable:
-
-```bash
-cargo build --release
-```
-
-The executable will be located in `target/release/proxycat.exe` 
